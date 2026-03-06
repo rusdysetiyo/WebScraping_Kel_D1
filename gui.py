@@ -3,11 +3,10 @@
 # scraper.py does the actual fetching; this file just shows the results.
 
 import sys
-import threading
 from datetime import datetime
 
 import pandas as pd
-from PyQt5.QtCore import QDate, QObject, Qt, pyqtSignal
+from PyQt5.QtCore import QDate, Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -31,17 +30,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-
-# Qt signals are the only safe way to update the GUI from a background thread.
-# Direct calls to GUI widgets from worker threads will crash the app.
-
-class ScraperSignals(QObject):
-    progress      = pyqtSignal(int)
-    article_found = pyqtSignal(dict)
-    log_message   = pyqtSignal(str)
-    finished      = pyqtSignal()
-    error         = pyqtSignal(str)
+from threading_manager import ThreadingManager
 
 
 APP_STYLE = """
@@ -272,32 +261,33 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("News Scraper — Web Scraping GUI")
         self.setMinimumSize(1150, 780)
 
-        self.signals         = ScraperSignals()
-        self.all_data        = []
-        self.scraping_thread = None
+        self.all_data = []
+
+        # threading_manager yang handle semua logic scraping di background
+        # gui cukup connect ke sinyalnya aja
+        self.tm = ThreadingManager()
 
         self._connect_signals()
         self._init_ui()
         self.setStyleSheet(APP_STYLE)
 
     def _connect_signals(self):
-        self.signals.progress.connect(self._on_progress)
-        self.signals.article_found.connect(self._on_article_found)
-        self.signals.log_message.connect(self._on_log)
-        self.signals.finished.connect(self._on_finished)
-        self.signals.error.connect(self._on_error)
+        # connect ke sinyal dari threading_manager
+        # setiap sinyal sudah jalan di main thread jadi aman langsung update widget
+        self.tm.update_progress.connect(self._on_progress)
+        self.tm.data_ready.connect(self._on_data_ready)
+        self.tm.log_message.connect(self._on_log)
+        self.tm.error_occurred.connect(self._on_error)
 
     def _init_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
 
-        # outer layout — header on top, sidebar+content below
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(self._build_header())
 
-        # main area
         main = QHBoxLayout()
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
@@ -355,6 +345,13 @@ class MainWindow(QMainWindow):
         self.limit_spin.setValue(20)
         self.limit_spin.setMinimumHeight(32)
         self.limit_spin.setToolTip("Max number of articles to scrape")
+
+        # Keywords — dikirim ke threading_manager buat filter di scraper_core
+        lbl_keywords = QLabel("Keywords (opsional)")
+        lbl_keywords.setStyleSheet("color: #000000; font-size: 11px; font-weight: bold;")
+        self.keywords_input = QLineEdit()
+        self.keywords_input.setPlaceholderText("pisahkan dengan koma, misal: politik, ekonomi")
+        self.keywords_input.setMinimumHeight(34)
 
         # Date filter
         self.date_filter_check = QCheckBox("Filter Tanggal")
@@ -418,6 +415,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(divider())
         layout.addWidget(lbl_limit)
         layout.addWidget(self.limit_spin)
+        layout.addWidget(lbl_keywords)
+        layout.addWidget(self.keywords_input)
         layout.addWidget(divider())
         layout.addWidget(self.date_filter_check)
         layout.addWidget(lbl_from)
@@ -513,7 +512,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "URL Tidak Valid", "URL harus diawali dengan http:// atau https://")
             return
 
-        # reset everything before a new run
+        # bersihkan hasil scraping sebelumnya sebelum mulai yang baru
         self.all_data.clear()
         self.table.setRowCount(0)
         self.total_label.setText("Total: 0 artikel ditemukan")
@@ -524,144 +523,65 @@ class MainWindow(QMainWindow):
         self.btn_export_csv.setEnabled(False)
         self.btn_export_excel.setEnabled(False)
         self.status_badge.setText("Scraping...")
-        self.status_badge.setStyleSheet("color: #ccffcc; font-weight: bold; font-size: 11px; background: transparent;")
+        self.status_badge.setStyleSheet("color: #ffff99; font-weight: bold; font-size: 11px; background: transparent;")
 
-        self._log(f"Starting scrape: {url}")
-        self._log(f"Limit: {self.limit_spin.value()} articles")
+        # parse keywords dari input — pisah berdasarkan koma, buang spasi
+        raw_keywords = self.keywords_input.text().strip()
+        keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()] if raw_keywords else []
+
+        self._log(f"Mulai scraping: {url}")
+        if keywords:
+            self._log(f"Keywords: {', '.join(keywords)}")
         if self.date_filter_check.isChecked():
             self._log(
-                f"Date filter: {self.date_from.date().toString('dd-MM-yyyy')} "
-                f"to {self.date_to.date().toString('dd-MM-yyyy')}"
+                f"Filter tanggal: {self.date_from.date().toString('dd-MM-yyyy')} "
+                f"s/d {self.date_to.date().toString('dd-MM-yyyy')}"
             )
 
-        params = {
-            "url":         url,
-            "limit":       self.limit_spin.value(),
-            "date_filter": self.date_filter_check.isChecked(),
-            "date_from":   self.date_from.date().toPyDate() if self.date_filter_check.isChecked() else None,
-            "date_to":     self.date_to.date().toPyDate()   if self.date_filter_check.isChecked() else None,
-        }
-
-        # daemon=True so the thread dies automatically when the app closes
-        self.scraping_thread = threading.Thread(
-            target=self._run_scraper_thread,
-            args=(params,),
-            daemon=True,
-        )
-        self.scraping_thread.start()
-
-    def _run_scraper_thread(self, params):
-        # two-phase approach: collect all links first, then scrape each one.
-        # this way we can show accurate progress (x/total) instead of unknown.
-        try:
-            from scraper import scrape_tautan, scrape_konten
-
-            url   = params["url"]
-            limit = params["limit"]
-
-            # grab links first before opening any article pages
-            self.signals.log_message.emit("Mengambil daftar tautan artikel...")
-            links = scrape_tautan(url, max_tautan=limit)
-
-            if not links:
-                self.signals.error.emit("Tidak ada tautan artikel yang ditemukan di halaman tersebut.")
-                return
-
-            self.signals.log_message.emit(f"{len(links)} tautan ditemukan. Mulai scraping konten...")
-
-            # scrape one at a time so we can emit progress and respect stop_flag
-            for i, link in enumerate(links):
-                if self._stop_flag[0]:
-                    break
-
-                self.signals.log_message.emit(f"[{i + 1}/{len(links)}] Scraping: {link}")
-                artikel = scrape_konten(link)
-
-                # scraper returns 'Tidak ditemukan' as a sentinel — treat it as empty
-                if artikel["judul"] == "Tidak ditemukan" and artikel["isi"] == "Tidak ditemukan":
-                    self.signals.log_message.emit(f"  -> Dilewati (konten kosong)")
-                    continue
-
-                # filter runs here (not in scraper) so scraper stays generic
-                if params["date_filter"] and params["date_from"] and params["date_to"]:
-                    artikel_tanggal = self._parse_tanggal(artikel["tanggal"])
-                    if artikel_tanggal:
-                        if not (params["date_from"] <= artikel_tanggal <= params["date_to"]):
-                            self.signals.log_message.emit(f"  -> Dilewati (di luar rentang tanggal)")
-                            continue
-
-                self.signals.article_found.emit({
-                    "judul":   artikel["judul"],
-                    "tanggal": artikel["tanggal"],
-                    "isi":     artikel["isi"],
-                    "url":     artikel.get("url", link),
-                })
-
-                progress = int((i + 1) / len(links) * 100)
-                self.signals.progress.emit(progress)
-
-            self.signals.finished.emit()
-
-        except ImportError:
-            self.signals.error.emit("scraper.py tidak ditemukan. Pastikan file scraper.py ada di folder yang sama.")
-        except Exception as e:
-            self.signals.error.emit(str(e))
-
-    def _parse_tanggal(self, tanggal_str):
-        # scraper doesn't normalize dates, so we try multiple formats here.
-        # returns None instead of raising so the caller can decide what to do with unparseable dates.
-        from datetime import date
-        formats = [
-            "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y",
-            "%d %B %Y", "%B %d, %Y", "%d %b %Y",
-        ]
-        for fmt in formats:
-            try:
-                return datetime.strptime(tanggal_str.strip(), fmt).date()
-            except ValueError:
-                continue
-        return None
-
-    # bool is immutable in Python, so we wrap it in a list to allow mutation from the worker thread
-    @property
-    def _stop_flag(self):
-        if not hasattr(self, "_stop_flag_list"):
-            self._stop_flag_list = [False]
-        return self._stop_flag_list
+        # serahin ke threading_manager — dia yang urus browser dan scraping
+        self.tm.start_scraping_task(url, keywords)
 
     def _request_stop(self):
-        self._stop_flag[0] = True
+        # threading_manager belum expose stop method, jadi untuk sekarang cukup disable tombol
+        # koordinasi sama yang pegang threading_manager buat nambahin fitur ini
         self.btn_stop.setEnabled(False)
-        self._log("Stop requested, waiting for current article to finish...")
+        self._log("Stop diminta — menunggu artikel saat ini selesai...")
 
     # -------------------------------------------------------------------------
 
     def _on_progress(self, value: int):
         self.progress_bar.setValue(value)
         self.progress_label.setText(f"Memproses... {value}%")
+        if value == 100:
+            self.progress_label.setText("Selesai!")
 
-    def _on_article_found(self, data: dict):
-        row = self.table.rowCount()
-        self.table.insertRow(row)
+    def _on_data_ready(self, data: list):
+        # data_ready ngirim semua hasil sekaligus dalam bentuk list
+        # loop di sini buat masukin satu-satu ke tabel
+        for item in data:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
 
-        no_item = QTableWidgetItem(str(row + 1))
-        no_item.setTextAlignment(Qt.AlignCenter)
+            no_item = QTableWidgetItem(str(row + 1))
+            no_item.setTextAlignment(Qt.AlignCenter)
 
-        judul   = data.get("judul",   "-")
-        tanggal = data.get("tanggal", "-")
-        isi     = data.get("isi",     "-")
-        url     = data.get("url",     "-")
-        preview = (isi[:120] + "...") if len(isi) > 120 else isi
+            judul   = item.get("judul",   "-")
+            tanggal = item.get("tanggal", "-")
+            isi     = item.get("isi",     "-")
+            url     = item.get("url",     "-")
+            preview = (isi[:120] + "...") if len(isi) > 120 else isi
 
-        self.table.setItem(row, 0, no_item)
-        self.table.setItem(row, 1, QTableWidgetItem(judul))
-        self.table.setItem(row, 2, QTableWidgetItem(tanggal))
-        self.table.setItem(row, 3, QTableWidgetItem(preview))
-        self.table.setItem(row, 4, QTableWidgetItem(url))
+            self.table.setItem(row, 0, no_item)
+            self.table.setItem(row, 1, QTableWidgetItem(judul))
+            self.table.setItem(row, 2, QTableWidgetItem(tanggal))
+            self.table.setItem(row, 3, QTableWidgetItem(preview))
+            self.table.setItem(row, 4, QTableWidgetItem(url))
 
-        self.all_data.append({"judul": judul, "tanggal": tanggal, "isi": isi, "url": url})
-        self.total_label.setText(f"Total: {row + 1} artikel ditemukan")
+            self.all_data.append({"judul": judul, "tanggal": tanggal, "isi": isi, "url": url})
+
+        self.total_label.setText(f"Total: {len(self.all_data)} artikel ditemukan")
         self.table.scrollToBottom()
+        self._on_finished()
 
     def _on_log(self, msg: str):
         self._log(msg)
