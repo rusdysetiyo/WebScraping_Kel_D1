@@ -265,6 +265,7 @@ class MainWindow(QMainWindow):
 
         # threading_manager yang handle semua logic scraping di background
         # gui cukup connect ke sinyalnya aja
+        self._stop_flag = [False]
         self.tm = ThreadingManager()
 
         self._connect_signals()
@@ -525,6 +526,7 @@ class MainWindow(QMainWindow):
         self.status_badge.setText("Scraping...")
         self.status_badge.setStyleSheet("color: #ffff99; font-weight: bold; font-size: 11px; background: transparent;")
 
+        limit_artikel = self.limit_spin.value()
         # parse keywords dari input — pisah berdasarkan koma, buang spasi
         raw_keywords = self.keywords_input.text().strip()
         keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()] if raw_keywords else []
@@ -539,11 +541,13 @@ class MainWindow(QMainWindow):
             )
 
         # serahin ke threading_manager — dia yang urus browser dan scraping
-        self.tm.start_scraping_task(url, keywords)
+        limit_artikel = self.limit_spin.value()
+        self.tm.start_scraping_task(url, keywords, limit_artikel)
 
     def _request_stop(self):
         # threading_manager belum expose stop method, jadi untuk sekarang cukup disable tombol
         # koordinasi sama yang pegang threading_manager buat nambahin fitur ini
+        self._stop_flag[0] = True
         self.btn_stop.setEnabled(False)
         self._log("Stop diminta — menunggu artikel saat ini selesai...")
 
