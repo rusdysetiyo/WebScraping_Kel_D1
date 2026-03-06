@@ -1,6 +1,6 @@
 import threading
 from PyQt5.QtCore import QObject, pyqtSignal
-import scraper_core
+import scraper
 import data_service
 
 class ThreadingManager(QObject):
@@ -26,7 +26,7 @@ class ThreadingManager(QObject):
 
 
     #  publlic method yg bakal dipanggil gui_manager
-    def start_scraping_task(self, target_url: str, keywords: list) -> None:
+    def start_scraping_task(self, target_url: str, keywords: list, limit: int) -> None:
     
         # biar ga double-run kalo tombolnya diteken pas scraping masih jalan
         if self._worker_thread and self._worker_thread.is_alive():
@@ -39,56 +39,64 @@ class ThreadingManager(QObject):
         # kalo aplikasi ditutup paksa oleh pengguna
         self._worker_thread = threading.Thread(
             target=self._run_engine,
-            args=(target_url, keywords),
+            args=(target_url, keywords, limit),
             daemon=True,
         )
         self._worker_thread.start()
 
     # private method yg bakal jalan di dalem worker thread
-    def _run_engine(self, target_url: str, keywords: list) -> None:
-
-        # `driver` di luar try biar blok 'finally' bisa
-        # nutup browser walo ada error sebelum driver dibuat
-        driver = None
-
+    def _run_engine(self, target_url: str, keywords: list, limit: int) -> None:
         try:
-
-            # inisialisasi browser
-            self.log_message.emit("Memulai Browser...")
+            self.log_message.emit("Mencari daftar tautan artikel...")
             self.update_progress.emit(10)
 
-            driver = scraper_core.init_driver()
+            # 1. Ambil daftar link (Ganti extract_data menjadi scrape_tautan)
+            links = scraper.scrape_tautan(target_url, max_tautan=limit)
 
-            # ekstraksi data (sama Selenium)
-            self.log_message.emit(f"Membuka URL: {target_url}")
+            if not links:
+                self.error_occurred.emit("Tidak ada artikel ditemukan di URL tersebut.")
+                return
+
             self.update_progress.emit(30)
+            hasil_akhir = []
 
-            raw_data = scraper_core.extract_data(driver, target_url, keywords)
+            # 2. Ambil konten dari setiap link yang ditemukan
+            for i, link in enumerate(links):
+                self.log_message.emit(f"Mengekstrak ({i+1}/{len(links)}): {link}")
+                
+                # Ganti extract_data menjadi scrape_konten
+                data = scraper.scrape_konten(link)
+                cocok = False
+                # Filter sederhana berdasarkan keyword (opsional jika scraper belum filter)
+                if keywords:
+                    teks_gabungan = (data['judul'] + data['isi']).lower()
+                    cocok = False
+                    for k in keywords:
+                        if k.lower() in teks_gabungan: # .lower() di sini kuncinya
+                            cocok = True
+                            break
+                    if cocok:
+                        hasil_akhir.append(data)
+                        self.log_message.emit(f"✅ Cocok: {data['judul'][:50]}...")
+                    else:
+                        self.log_message.emit(f"⏩ Lewati (tidak ada keyword): {data['judul'][:50]}...")
+                else:
+                    # Jika tidak pakai keyword, masukkan semua
+                    hasil_akhir.append(data)
 
-            self.update_progress.emit(60)
-            self.log_message.emit(
-                f"Data berhasil diekstrak ({len(raw_data)} item), "
-                "merapikan format..."
-            )
+            # Update progress secara dinamis
+            persen = 30 + int(((i + 1) / len(links)) * 60)
+            self.update_progress.emit(persen)
 
-            # cleaning n formatting (sama data_service)
-            cleaned_data = data_service.clean_format(raw_data)
-
-            self.update_progress.emit(90)
-
-            # ngirim hasil ke GUI
-            self.data_ready.emit(cleaned_data)
+            # 3. Kirim hasil ke GUI
+            self.data_ready.emit(hasil_akhir)
             self.update_progress.emit(100)
             self.log_message.emit("✅ Proses Selesai!")
 
         except Exception as e:
-            # utk nampilin error di GUI pas lagi error
             self.error_occurred.emit(str(e))
             self.log_message.emit(f"[ERROR] {e}")
 
         finally:
-            # buat nutup browser (biar chromedriver ga gantung di background)
-            if driver is not None:
-                scraper_core.close_browser(driver)
-                self.log_message.emit("Browser ditutup.")
-            # men de-alokasi
+            self.log_message.emit("Proses selesai, mematikan mesin scraping...")
+            self._worker_thread = None
