@@ -1,12 +1,17 @@
+import time
+import random
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from urllib.parse import urlparse
-import time
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+
 
 def setup_webdriver():
     """
-    Fungsi bantuan untuk menginisialisasi dan mengonfigurasi Selenium WebDriver.
+    Fungsi untuk menginisialisasi dan mengonfigurasi Selenium WebDriver.
     """
     options = Options()
     options.add_argument("--headless")
@@ -29,7 +34,7 @@ def scrape_tautan(url_utama, max_tautan=10):
     """
     Mengambil tautan artikel dari halaman utama berita.
     """
-    driver = setup_webdriver()  # Memanggil konfigurasi terpusat
+    driver = setup_webdriver()  
     kumpulan_tautan = []
 
     try:
@@ -71,7 +76,7 @@ def scrape_konten(url):
     """
     Mengunjungi link artikel dan mengambil Judul, Tanggal, dan Isi Berita.
     """
-    driver = setup_webdriver()  # Memanggil konfigurasi terpusat
+    driver = setup_webdriver()  
     hasil_ekstraksi = {
         "url": url,
         "judul": "Tidak ditemukan",
@@ -80,8 +85,8 @@ def scrape_konten(url):
     }
 
     try:
+        time.sleep(random.uniform(2.0, 4.5))
         driver.get(url)
-        time.sleep(2)
 
         domain = urlparse(url).netloc
 
@@ -104,6 +109,10 @@ def scrape_konten(url):
             sel_judul = "h1"
             sel_tanggal = "time, .date, .publish-date"
             sel_body = "article p, .content p, article li"
+
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, sel_judul))
+        )
 
         # Ekstraksi Judul
         elemen_judul = driver.find_elements(By.CSS_SELECTOR, sel_judul)
@@ -132,3 +141,38 @@ def scrape_konten(url):
         driver.quit()
 
     return hasil_ekstraksi
+
+
+if __name__ == "__main__":
+    print("Mulai proses testing scraper...")
+
+    url_target = "https://www.cnnindonesia.com/nasional/politik"
+    batas_link = 3 
+
+    kumpulan_link = scrape_tautan(url_target, max_tautan=batas_link)
+
+    if not kumpulan_link:
+        print("Gagal mendapatkan tautan atau daftar tautan kosong.")
+    else:
+        print(f"Berhasil mendapatkan {len(kumpulan_link)} tautan:")
+        for i, link in enumerate(kumpulan_link, 1):
+            print(f"  {i}. {link}")
+
+        print("\nMemulai ekstraksi informasi dari masing-masing artikel...")
+
+        for i, link in enumerate(kumpulan_link, 1):
+            print(f"\n--- Mengekstrak Artikel ke-{i} ---")
+            print(f"URL Target: {link}")
+
+            # Panggil fungsi scrape_konten
+            data_artikel = scrape_konten(link)
+
+            # Tampilkan hasilnya
+            print(f"Judul   : {data_artikel['judul']}")
+            print(f"Tanggal : {data_artikel['tanggal']}")
+
+            # Memotong isi berita agar terminal tidak terlalu penuh saat testing
+            isi_preview = data_artikel['isi'][:200].replace('\n', ' ')
+            print(f"Isi     : {isi_preview}... [DIPOTONG UNTUK PREVIEW]")
+
+    print("\nProses testing selesai!")
