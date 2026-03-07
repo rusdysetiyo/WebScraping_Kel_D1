@@ -5,7 +5,6 @@
 import sys
 from datetime import datetime
 
-import pandas as pd
 from PyQt5.QtCore import QDate, Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
@@ -31,6 +30,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from threading_manager import ThreadingManager
+import data_service
 
 
 APP_STYLE = """
@@ -538,12 +538,21 @@ class MainWindow(QMainWindow):
                 f"s/d {self.date_to.date().toString('dd-MM-yyyy')}"
             )
 
-        # serahin ke threading_manager — dia yang urus browser dan scraping
-        self.tm.start_scraping_task(url, keywords)
+        # lempar juga limit dan stop_flag biar threading_manager bisa handle stop & limit
+        self._stop_flag[0] = False  # reset dulu setiap kali mulai scraping baru
+        limit_artikel = self.limit_spin.value()
+        self.tm.start_scraping_task(url, keywords, limit_artikel, self._stop_flag)
+
+    # dibungkus list biar bisa di-mutate dari thread lain
+    # kalau pakai bool biasa, perubahan nilai di thread tidak kelihatan dari thread lain
+    @property
+    def _stop_flag(self):
+        if not hasattr(self, "_stop_flag_list"):
+            self._stop_flag_list = [False]
+        return self._stop_flag_list
 
     def _request_stop(self):
-        # threading_manager belum expose stop method, jadi untuk sekarang cukup disable tombol
-        # koordinasi sama yang pegang threading_manager buat nambahin fitur ini
+        self._stop_flag[0] = True
         self.btn_stop.setEnabled(False)
         self._log("Stop diminta — menunggu artikel saat ini selesai...")
 
@@ -659,6 +668,8 @@ class MainWindow(QMainWindow):
                 for row in ws.iter_rows(min_row=2):
                     for cell in row:
                         cell.alignment = Alignment(wrap_text=True, vertical="top")
+                    # kolom urutan: No(A), index(B), judul(C), tanggal(D), isi(E), url(F)
+                    # isi ada di kolom 5 (E) — sesuai output pandas
                     isi_val = str(ws.cell(row=row[0].row, column=5).value or "")
                     estimated_lines = max(1, len(isi_val) // 80)
                     ws.row_dimensions[row[0].row].height = min(estimated_lines * 15, 150)
@@ -691,9 +702,9 @@ class MainWindow(QMainWindow):
         self.log_box.append(f"[{timestamp}]  {msg}")
 
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec_())
+# if __name__ == "__main__":
+#     app = QApplication(sys.argv)
+#     app.setStyle("Fusion")
+#     window = MainWindow()
+#     window.show()
+#     sys.exit(app.exec_())
