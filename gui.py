@@ -12,7 +12,6 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QDateEdit,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -22,7 +21,6 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -263,17 +261,21 @@ class MainWindow(QMainWindow):
 
         self.all_data = []
 
-        # threading_manager yang handle semua logic scraping di background
-        # gui cukup connect ke sinyalnya aja
+        # Qt signals are the only safe way to update the GUI from a background thread.
+        # Direct calls to GUI widgets from worker threads will crash the app.
+        self._stop_flag_list = [False]
         self.tm = ThreadingManager()
 
         self._connect_signals()
         self._init_ui()
         self.setStyleSheet(APP_STYLE)
 
+    # bool is immutable in Python, so we wrap it in a list to allow mutation from the worker thread
+    @property
+    def _stop_flag(self):
+        return self._stop_flag_list
+
     def _connect_signals(self):
-        # connect ke sinyal dari threading_manager
-        # setiap sinyal sudah jalan di main thread jadi aman langsung update widget
         self.tm.update_progress.connect(self._on_progress)
         self.tm.data_ready.connect(self._on_data_ready)
         self.tm.log_message.connect(self._on_log)
@@ -330,30 +332,25 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
 
-        # URL input
         lbl_url = QLabel("URL Halaman Berita")
         lbl_url.setStyleSheet("color: #000000; font-size: 11px; font-weight: bold;")
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("https://...")
         self.url_input.setMinimumHeight(34)
 
-        # Limit
         lbl_limit = QLabel("Limit Artikel")
         lbl_limit.setStyleSheet("color: #000000; font-size: 11px; font-weight: bold;")
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(1, 1000)
         self.limit_spin.setValue(20)
         self.limit_spin.setMinimumHeight(32)
-        self.limit_spin.setToolTip("Max number of articles to scrape")
 
-        # Keywords — dikirim ke threading_manager buat filter di scraper_core
         lbl_keywords = QLabel("Keywords (opsional)")
         lbl_keywords.setStyleSheet("color: #000000; font-size: 11px; font-weight: bold;")
         self.keywords_input = QLineEdit()
         self.keywords_input.setPlaceholderText("pisahkan dengan koma, misal: politik, ekonomi")
         self.keywords_input.setMinimumHeight(34)
 
-        # Date filter
         self.date_filter_check = QCheckBox("Filter Tanggal")
         self.date_filter_check.setStyleSheet("color: #000000; font-weight: bold;")
         self.date_filter_check.stateChanged.connect(self._toggle_date_filter)
@@ -374,7 +371,6 @@ class MainWindow(QMainWindow):
         self.date_to.setEnabled(False)
         self.date_to.setMinimumHeight(32)
 
-        # Buttons
         self.btn_start = QPushButton("Mulai Scraping")
         self.btn_start.setObjectName("btn_start")
         self.btn_start.setMinimumHeight(36)
@@ -403,7 +399,6 @@ class MainWindow(QMainWindow):
         self.btn_clear.setMinimumHeight(34)
         self.btn_clear.clicked.connect(self._clear_all)
 
-        # divider helper
         def divider():
             d = QWidget()
             d.setFixedHeight(1)
@@ -441,7 +436,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        # progress row
         prog_widget = QWidget()
         prog_widget.setStyleSheet("background: transparent;")
         prog_layout = QHBoxLayout(prog_widget)
@@ -462,7 +456,6 @@ class MainWindow(QMainWindow):
         prog_layout.addWidget(self.progress_label)
         prog_layout.addWidget(self.progress_bar)
 
-        # table
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["No", "Judul Berita", "Tanggal", "Isi (Preview)", "URL"])
@@ -481,7 +474,6 @@ class MainWindow(QMainWindow):
         self.total_label = QLabel("Total: 0 artikel ditemukan")
         self.total_label.setStyleSheet("color: #000000; font-size: 12px;")
 
-        # log
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setMaximumHeight(130)
@@ -512,7 +504,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "URL Tidak Valid", "URL harus diawali dengan http:// atau https://")
             return
 
-        # bersihkan hasil scraping sebelumnya sebelum mulai yang baru
         self.all_data.clear()
         self.table.setRowCount(0)
         self.total_label.setText("Total: 0 artikel ditemukan")
@@ -525,7 +516,6 @@ class MainWindow(QMainWindow):
         self.status_badge.setText("Scraping...")
         self.status_badge.setStyleSheet("color: #ffff99; font-weight: bold; font-size: 11px; background: transparent;")
 
-        # parse keywords dari input — pisah berdasarkan koma, buang spasi
         raw_keywords = self.keywords_input.text().strip()
         keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()] if raw_keywords else []
 
@@ -538,23 +528,14 @@ class MainWindow(QMainWindow):
                 f"s/d {self.date_to.date().toString('dd-MM-yyyy')}"
             )
 
-        # lempar juga limit dan stop_flag biar threading_manager bisa handle stop & limit
-        self._stop_flag[0] = False  # reset dulu setiap kali mulai scraping baru
-        limit_artikel = self.limit_spin.value()
-        self.tm.start_scraping_task(url, keywords, limit_artikel, self._stop_flag)
-
-    # dibungkus list biar bisa di-mutate dari thread lain
-    # kalau pakai bool biasa, perubahan nilai di thread tidak kelihatan dari thread lain
-    @property
-    def _stop_flag(self):
-        if not hasattr(self, "_stop_flag_list"):
-            self._stop_flag_list = [False]
-        return self._stop_flag_list
+        # reset stop flag before each new run so a previous stop doesn't block the next one
+        self._stop_flag[0] = False
+        self.tm.start_scraping_task(url, keywords, self.limit_spin.value(), self._stop_flag)
 
     def _request_stop(self):
         self._stop_flag[0] = True
         self.btn_stop.setEnabled(False)
-        self._log("Stop diminta — menunggu artikel saat ini selesai...")
+        self._log("Stop requested — waiting for current article to finish...")
 
     # -------------------------------------------------------------------------
 
@@ -565,8 +546,7 @@ class MainWindow(QMainWindow):
             self.progress_label.setText("Selesai!")
 
     def _on_data_ready(self, data: list):
-        # data_ready ngirim semua hasil sekaligus dalam bentuk list
-        # loop di sini buat masukin satu-satu ke tabel
+        # threading_manager sends all results at once — insert row by row so the table updates live
         for item in data:
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -616,67 +596,29 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Tidak Ada Data", "Belum ada data untuk diexport.")
             return
 
-        df = pd.DataFrame(self.all_data, columns=["judul", "tanggal", "isi", "url"])
-        df.index += 1
-
-        # article body has \n\n between paragraphs — collapses into one cell cleanly
-        df["isi"] = df["isi"].str.replace(r"\n+", " ", regex=True).str.strip()
-
         if fmt == "csv":
             path, _ = QFileDialog.getSaveFileName(
                 self, "Simpan sebagai CSV", "hasil_scraping.csv", "CSV Files (*.csv)"
             )
             if path:
-                df.to_csv(path, index_label="No", encoding="utf-8-sig")
-                self._log(f"Saved: {path}")
-                QMessageBox.information(self, "Sukses", f"File CSV berhasil disimpan!\n{path}")
+                ok = data_service.export_to_csv(self.all_data, path)
+                if ok:
+                    self._log(f"Saved: {path}")
+                    QMessageBox.information(self, "Sukses", f"File CSV berhasil disimpan!\n{path}")
+                else:
+                    QMessageBox.critical(self, "Gagal", "Export CSV gagal. Cek log untuk detail.")
 
         elif fmt == "excel":
             path, _ = QFileDialog.getSaveFileName(
                 self, "Simpan sebagai Excel", "hasil_scraping.xlsx", "Excel Files (*.xlsx)"
             )
             if path:
-                from openpyxl import load_workbook
-                from openpyxl.styles import Font, PatternFill, Alignment
-
-                df.to_excel(path, index_label="No")
-
-                # pandas doesn't support styling, so we reopen with openpyxl to apply it
-                wb = load_workbook(path)
-                ws = wb.active
-
-                # make headers visually distinct so readers don't mistake them for data rows
-                header_fill = PatternFill("solid", fgColor="1565C0")
-                header_font = Font(bold=True, color="FFFFFF", size=11)
-                for cell in ws[1]:
-                    cell.fill = header_fill
-                    cell.font = header_font
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-
-                # without this, headers scroll away and 500-row exports become unreadable
-                ws.freeze_panes = "A2"
-
-                # isi column intentionally wide — article bodies are long
-                ws.column_dimensions["A"].width = 5   # No
-                ws.column_dimensions["B"].width = 8   # index
-                ws.column_dimensions["C"].width = 55  # judul
-                ws.column_dimensions["D"].width = 25  # tanggal
-                ws.column_dimensions["E"].width = 80  # isi
-                ws.column_dimensions["F"].width = 50  # url
-
-                # row height is estimated from char count — openpyxl can't measure actual rendered height
-                for row in ws.iter_rows(min_row=2):
-                    for cell in row:
-                        cell.alignment = Alignment(wrap_text=True, vertical="top")
-                    # kolom urutan: No(A), index(B), judul(C), tanggal(D), isi(E), url(F)
-                    # isi ada di kolom 5 (E) — sesuai output pandas
-                    isi_val = str(ws.cell(row=row[0].row, column=5).value or "")
-                    estimated_lines = max(1, len(isi_val) // 80)
-                    ws.row_dimensions[row[0].row].height = min(estimated_lines * 15, 150)
-
-                wb.save(path)
-                self._log(f"Saved: {path}")
-                QMessageBox.information(self, "Sukses", f"File Excel berhasil disimpan!\n{path}")
+                ok = data_service.export_to_excel(self.all_data, path)
+                if ok:
+                    self._log(f"Saved: {path}")
+                    QMessageBox.information(self, "Sukses", f"File Excel berhasil disimpan!\n{path}")
+                else:
+                    QMessageBox.critical(self, "Gagal", "Export Excel gagal. Cek log untuk detail.")
 
     def _clear_all(self):
         self.table.setRowCount(0)
